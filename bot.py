@@ -86,11 +86,13 @@ async def run_challenge(ctx):
             f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
         )
 
-        for word_num in range(1, CHALLENGE_WORDS + 1):
+        pool = get_words()
+        word_list = random.sample(pool, min(CHALLENGE_WORDS, len(pool)))
+
+        for word_num, word in enumerate(word_list, 1):
             if channel_id not in active_challenges:
                 break
 
-            word = random.choice(get_words())
             scrambled = scramble_word(word)
             word_event = asyncio.Event()
             active_games[channel_id] = {
@@ -455,6 +457,7 @@ async def wordcount(ctx):
 
 
 @bot.command(name="words")
+@commands.has_permissions(manage_messages=True)
 async def words(ctx):
     custom = load_json(WORDS_FILE, [])
     if not custom:
@@ -507,6 +510,7 @@ async def removeword(ctx, *, word: str):
 @hint.error
 @addword.error
 @removeword.error
+@words.error
 async def manage_messages_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Messages** permission to use this command.")
