@@ -10,7 +10,7 @@ primary_region = 'ams'
   dockerfile = 'Dockerfile'
 
 [processes]
-  app = 'python bot.py'
+  app = "/app/.venv/bin/python bot.py"'
 
 [http_service]
   internal_port = 8000
