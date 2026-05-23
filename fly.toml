@@ -6,9 +6,6 @@ primary_region = 'ams'
 [build]
   dockerfile = 'Dockerfile'
 
-[processes]
-  app = "/app/.venv/bin/python bot.py"
-
 [http_service]
   internal_port = 8000
   force_https = true
