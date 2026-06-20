@@ -674,7 +674,7 @@ async def wordcount(ctx):
     custom = db_get_custom_words(str(ctx.guild.id))
     if custom:
         await ctx.send(
-            f"📚 Word pool: **{len(custom)} custom words** (built-in words are not used while custom words are set)"
+            f"📚 Word pool: **{len(custom)} custom words** (only your server's words are used)"
         )
     else:
         await ctx.send(
