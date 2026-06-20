@@ -169,9 +169,26 @@ async def on_command_error(ctx, error):
     print(f"[ERROR] Unhandled command error in '{ctx.command}': {error}")
 
 
+async def _wait_with_pause(word_event, pause_event, timeout):
+    """Wait for word_event with a pauseable countdown. Returns True if guessed, False if timed out."""
+    elapsed = 0.0
+    tick = 0.25
+    while elapsed < timeout:
+        if word_event.is_set():
+            return True
+        if pause_event.is_set():
+            elapsed += tick
+        await asyncio.sleep(tick)
+    return False
+
+
 async def run_challenge(ctx):
     channel_id = ctx.channel.id
     try:
+        pause_event = asyncio.Event()
+        pause_event.set()
+        active_challenges[channel_id]["pause_event"] = pause_event
+
         await ctx.send(
             f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
         )
@@ -196,9 +213,8 @@ async def run_challenge(ctx):
                 f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!"
             )
 
-            try:
-                await asyncio.wait_for(word_event.wait(), timeout=CHALLENGE_WORD_TIMEOUT)
-            except asyncio.TimeoutError:
+            guessed = await _wait_with_pause(word_event, pause_event, CHALLENGE_WORD_TIMEOUT)
+            if not guessed:
                 active_games.pop(channel_id, None)
                 await ctx.channel.send(f"⏰ Nobody got it! The word was **{word}**.")
 
@@ -410,6 +426,54 @@ async def end(ctx):
 async def end_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Messages** permission to end a game.")
+
+
+@bot.command(name="pause")
+@commands.has_permissions(manage_messages=True)
+async def pause(ctx):
+    channel_id = ctx.channel.id
+    session = active_challenges.get(channel_id)
+    if not session:
+        await ctx.send("No challenge is running in this channel.")
+        return
+    pause_event = session.get("pause_event")
+    if pause_event is None or not pause_event.is_set():
+        await ctx.send("The challenge is already paused. Use `!resume` to continue.")
+        return
+    pause_event.clear()
+    game = active_games.get(channel_id)
+    scrambled = game["scrambled"] if game else "?"
+    await ctx.send(f"⏸️ Challenge paused! Timer frozen on **{scrambled}**. Use `!resume` when ready.")
+
+
+@pause.error
+async def pause_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need the **Manage Messages** permission to pause a challenge.")
+
+
+@bot.command(name="resume")
+@commands.has_permissions(manage_messages=True)
+async def resume(ctx):
+    channel_id = ctx.channel.id
+    session = active_challenges.get(channel_id)
+    if not session:
+        await ctx.send("No challenge is running in this channel.")
+        return
+    pause_event = session.get("pause_event")
+    if pause_event is None or pause_event.is_set():
+        await ctx.send("The challenge isn't paused.")
+        return
+    pause_event.set()
+    game = active_games.get(channel_id)
+    scrambled = game["scrambled"] if game else "?"
+    await ctx.send(f"▶️ Challenge resumed! Current word: **{scrambled}** — timer is running!")
+
+
+@resume.error
+async def resume_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need the **Manage Messages** permission to resume a challenge.")
 
 
 @bot.command(name="leaderboard")
