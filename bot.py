@@ -169,8 +169,9 @@ async def on_command_error(ctx, error):
     print(f"[ERROR] Unhandled command error in '{ctx.command}': {error}")
 
 
-async def _wait_with_pause(word_event, pause_event, timeout):
-    """Wait for word_event with a pauseable countdown. Returns True if guessed, False if timed out."""
+async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None):
+    """Wait for word_event with a pauseable countdown. Returns True if guessed, False if timed out.
+    Updates game_dict['elapsed'] each tick so !hint can read active elapsed time."""
     elapsed = 0.0
     tick = 0.25
     while elapsed < timeout:
@@ -178,6 +179,8 @@ async def _wait_with_pause(word_event, pause_event, timeout):
             return True
         if pause_event.is_set():
             elapsed += tick
+            if game_dict is not None:
+                game_dict["elapsed"] = elapsed
         await asyncio.sleep(tick)
     return False
 
@@ -202,18 +205,20 @@ async def run_challenge(ctx):
 
             scrambled = scramble_word(word)
             word_event = asyncio.Event()
-            active_games[channel_id] = {
+            game_dict = {
                 "word": word,
                 "scrambled": scrambled,
                 "challenge": True,
                 "word_event": word_event,
+                "elapsed": 0.0,
             }
+            active_games[channel_id] = game_dict
 
             await ctx.channel.send(
                 f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!"
             )
 
-            guessed = await _wait_with_pause(word_event, pause_event, CHALLENGE_WORD_TIMEOUT)
+            guessed = await _wait_with_pause(word_event, pause_event, CHALLENGE_WORD_TIMEOUT, game_dict)
             if not guessed:
                 active_games.pop(channel_id, None)
                 await ctx.channel.send(f"⏰ Nobody got it! The word was **{word}**.")
@@ -359,6 +364,8 @@ async def scramble(ctx):
     )
 
 
+HINT_UNLOCK_SECONDS = 40
+
 @bot.command(name="hint")
 @commands.has_permissions(manage_messages=True)
 async def hint(ctx):
@@ -367,7 +374,18 @@ async def hint(ctx):
         await ctx.send("No active game! Start one with `!scramble`.")
         return
 
-    word = active_games[channel_id]["word"]
+    game = active_games[channel_id]
+    word = game["word"]
+
+    if game.get("challenge"):
+        elapsed = game.get("elapsed", 0.0)
+        remaining = HINT_UNLOCK_SECONDS - elapsed
+        if remaining > 0:
+            await ctx.send(
+                f"🔒 Hint unlocks after **{HINT_UNLOCK_SECONDS}s** — available in **{int(remaining)+1}s**."
+            )
+            return
+
     await ctx.send(f"💡 Hint: The word starts with **{word[0].upper()}** and has **{len(word)}** letters.")
 
 
