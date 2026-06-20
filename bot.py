@@ -381,6 +381,37 @@ async def skip_error(ctx, error):
         await ctx.send(f"⏳ Skip is on cooldown. Try again in **{remaining}s**.")
 
 
+@bot.command(name="end")
+@commands.has_permissions(manage_messages=True)
+async def end(ctx):
+    channel_id = ctx.channel.id
+
+    if channel_id in active_challenges:
+        session = active_challenges.pop(channel_id, None)
+        game = active_games.pop(channel_id, None)
+        if session and session.get("task"):
+            session["task"].cancel()
+        word = game["word"] if game else None
+        msg = "🛑 Challenge ended early."
+        if word:
+            msg += f" The current word was **{word}**."
+        await ctx.send(msg)
+        return
+
+    if channel_id in active_games:
+        word = active_games.pop(channel_id)["word"]
+        await ctx.send(f"🛑 Game ended. The word was **{word}**.")
+        return
+
+    await ctx.send("There's no active game or challenge in this channel.")
+
+
+@end.error
+async def end_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You need the **Manage Messages** permission to end a game.")
+
+
 @bot.command(name="leaderboard")
 async def leaderboard(ctx):
     scores = load_json(SCORES_FILE, {})
