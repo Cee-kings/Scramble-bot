@@ -602,8 +602,7 @@ async def help_command(ctx):
         value=(
             "`!leaderboard` — Top 10 players\n"
             "`!stats [@user]` — View a player's score, words solved & rank\n"
-            "`!wordcount` — Total built-in vs. custom words\n"
-            "`!words` — List all custom words\n"
+            "`!wordcount` — Total words in this server's pool\n"
             "Just type in chat to guess the current word!"
         ),
         inline=False,
@@ -612,9 +611,13 @@ async def help_command(ctx):
         name="🎯 Manage Messages",
         value=(
             "`!scramble` — Start a new word game\n"
-            "`!hint` — Reveal the first letter & word length\n"
+            "`!challenge` — 20-word speed round, 60s per word\n"
+            "`!hint` — First & last letter + word length (instant in solo, unlocks at 40s in challenge)\n"
             "`!skip` — Give up and reveal the word (60s cooldown)\n"
-            "`!challenge` — 20-word round, 60s per word\n"
+            "`!pause` — Freeze the challenge timer\n"
+            "`!resume` — Unfreeze the challenge timer\n"
+            "`!end` — Stop the current game or challenge early\n"
+            "`!words` — List this server's custom words\n"
             "`!addword <word>` — Add a custom word\n"
             "`!removeword <word>` — Remove a custom word\n"
             "`!clearwords` — Clear all custom words"
