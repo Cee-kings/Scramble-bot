@@ -169,11 +169,13 @@ async def on_command_error(ctx, error):
     print(f"[ERROR] Unhandled command error in '{ctx.command}': {error}")
 
 
-async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None):
+async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None, on_hint=None, hint_at=None):
     """Wait for word_event with a pauseable countdown. Returns True if guessed, False if timed out.
-    Updates game_dict['elapsed'] each tick so !hint can read active elapsed time."""
+    Updates game_dict['elapsed'] each tick so !hint can read active elapsed time.
+    Calls on_hint() once when active elapsed time reaches hint_at seconds."""
     elapsed = 0.0
     tick = 0.25
+    hint_fired = False
     while elapsed < timeout:
         if word_event.is_set():
             return True
@@ -181,6 +183,9 @@ async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None):
             elapsed += tick
             if game_dict is not None:
                 game_dict["elapsed"] = elapsed
+            if on_hint and hint_at and not hint_fired and elapsed >= hint_at:
+                hint_fired = True
+                await on_hint()
         await asyncio.sleep(tick)
     return False
 
@@ -218,7 +223,18 @@ async def run_challenge(ctx):
                 f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!"
             )
 
-            guessed = await _wait_with_pause(word_event, pause_event, CHALLENGE_WORD_TIMEOUT, game_dict)
+            async def auto_hint():
+                game = active_games.get(channel_id)
+                if game and not word_event.is_set():
+                    w = game["word"]
+                    await ctx.channel.send(
+                        f"💡 **Auto-hint:** The word starts with **{w[0].upper()}** and has **{len(w)}** letters."
+                    )
+
+            guessed = await _wait_with_pause(
+                word_event, pause_event, CHALLENGE_WORD_TIMEOUT, game_dict,
+                on_hint=auto_hint, hint_at=HINT_UNLOCK_SECONDS
+            )
             if not guessed:
                 active_games.pop(channel_id, None)
                 await ctx.channel.send(f"⏰ Nobody got it! The word was **{word}**.")
