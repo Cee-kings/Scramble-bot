@@ -3,12 +3,12 @@ import json
 import random
 import asyncio
 import threading
-import psycopg2
 import discord
 from discord.ext import commands
 from flask import Flask
 
 SCORES_FILE = "scores.json"
+WORDS_FILE = "words.json"
 SKIP_COOLDOWN_SECONDS = 60
 CHALLENGE_WORDS = 20
 CHALLENGE_WORD_TIMEOUT = 60
@@ -43,69 +43,8 @@ def save_json(path, data):
         print(f"[ERROR] Failed to save {path}: {e}")
 
 
-def get_db_conn():
-    return psycopg2.connect(os.environ["DATABASE_URL"])
-
-
-def db_get_custom_words(guild_id: str) -> list:
-    try:
-        with get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT word FROM custom_words WHERE guild_id = %s ORDER BY word",
-                    (guild_id,)
-                )
-                return [row[0] for row in cur.fetchall()]
-    except Exception as e:
-        print(f"[ERROR] db_get_custom_words: {e}")
-        return []
-
-
-def db_add_custom_word(guild_id: str, word: str, added_by: str) -> bool:
-    try:
-        with get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO custom_words (guild_id, word, added_by) "
-                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                    (guild_id, word, added_by)
-                )
-                return cur.rowcount > 0
-    except Exception as e:
-        print(f"[ERROR] db_add_custom_word: {e}")
-        return False
-
-
-def db_remove_custom_word(guild_id: str, word: str) -> bool:
-    try:
-        with get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM custom_words WHERE guild_id = %s AND word = %s",
-                    (guild_id, word)
-                )
-                return cur.rowcount > 0
-    except Exception as e:
-        print(f"[ERROR] db_remove_custom_word: {e}")
-        return False
-
-
-def db_clear_custom_words(guild_id: str) -> int:
-    try:
-        with get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM custom_words WHERE guild_id = %s",
-                    (guild_id,)
-                )
-                return cur.rowcount
-    except Exception as e:
-        print(f"[ERROR] db_clear_custom_words: {e}")
-        return 0
-
-
-def get_words(guild_id: str) -> list:
-    custom = db_get_custom_words(guild_id)
+def get_words():
+    custom = load_json(WORDS_FILE, [])
     return list(set(DEFAULT_WORDS + custom))
 
 
@@ -147,7 +86,7 @@ async def run_challenge(ctx):
             f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
         )
 
-        pool = get_words(str(ctx.guild.id))
+        pool = get_words()
         word_list = random.sample(pool, min(CHALLENGE_WORDS, len(pool)))
 
         for word_num, word in enumerate(word_list, 1):
@@ -304,7 +243,7 @@ async def scramble(ctx):
         )
         return
 
-    word = random.choice(get_words(str(ctx.guild.id)))
+    word = random.choice(get_words())
     scrambled = scramble_word(word)
     active_games[channel_id] = {"word": word, "scrambled": scrambled}
 
@@ -478,8 +417,7 @@ async def clearwords(ctx):
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
-    guild_id = str(ctx.guild.id)
-    custom = db_get_custom_words(guild_id)
+    custom = load_json(WORDS_FILE, [])
     if not custom:
         await ctx.send("There are no custom words to clear.")
         return
@@ -498,8 +436,8 @@ async def clearwords(ctx):
         await ctx.send("Clear cancelled.")
         return
 
-    deleted = db_clear_custom_words(guild_id)
-    await ctx.send(f"🗑️ Cleared {deleted} custom word(s). The pool is back to {len(DEFAULT_WORDS)} built-in words.")
+    save_json(WORDS_FILE, [])
+    await ctx.send(f"🗑️ Cleared {len(custom)} custom word(s). The pool is back to {len(DEFAULT_WORDS)} built-in words.")
 
 
 @clearwords.error
@@ -510,7 +448,7 @@ async def clearwords_error(ctx, error):
 
 @bot.command(name="wordcount")
 async def wordcount(ctx):
-    custom = db_get_custom_words(str(ctx.guild.id))
+    custom = load_json(WORDS_FILE, [])
     total = len(DEFAULT_WORDS) + len(custom)
     await ctx.send(
         f"📚 Word pool: **{total} total** — "
@@ -521,12 +459,13 @@ async def wordcount(ctx):
 @bot.command(name="words")
 @commands.has_permissions(manage_messages=True)
 async def words(ctx):
-    custom = db_get_custom_words(str(ctx.guild.id))
+    custom = load_json(WORDS_FILE, [])
     if not custom:
         await ctx.send("No custom words yet! Add some with `!addword <word>`.")
         return
 
-    word_list = ", ".join(f"**{w}**" for w in custom)
+    sorted_words = sorted(custom)
+    word_list = ", ".join(f"**{w}**" for w in sorted_words)
     await ctx.send(f"📝 Custom words ({len(custom)}): {word_list}")
 
 
@@ -538,18 +477,14 @@ async def addword(ctx, *, word: str):
         await ctx.send("Words must be at least 3 characters long.")
         return
 
-    guild_id = str(ctx.guild.id)
-    if word in DEFAULT_WORDS:
-        await ctx.send(f"**{word}** is already in the built-in word pool.")
+    custom = load_json(WORDS_FILE, [])
+    if word in custom or word in DEFAULT_WORDS:
+        await ctx.send(f"**{word}** is already in the word pool.")
         return
 
-    added = db_add_custom_word(guild_id, word, str(ctx.author))
-    if not added:
-        await ctx.send(f"**{word}** is already in the custom word pool.")
-        return
-
-    pool_size = len(get_words(guild_id))
-    await ctx.send(f"✅ Added **{word}** to the word pool. (Pool size: {pool_size})")
+    custom.append(word)
+    save_json(WORDS_FILE, custom)
+    await ctx.send(f"✅ Added **{word}** to the word pool. (Pool size: {len(get_words())})")
 
 
 @bot.command(name="removeword")
@@ -557,15 +492,18 @@ async def addword(ctx, *, word: str):
 async def removeword(ctx, *, word: str):
     word = word.strip().lower()
 
+    custom = load_json(WORDS_FILE, [])
+
     if word in DEFAULT_WORDS:
         await ctx.send(f"**{word}** is a built-in word and cannot be removed.")
         return
 
-    removed = db_remove_custom_word(str(ctx.guild.id), word)
-    if not removed:
+    if word not in custom:
         await ctx.send(f"**{word}** is not in the custom word pool.")
         return
 
+    custom.remove(word)
+    save_json(WORDS_FILE, custom)
     await ctx.send(f"🗑️ Removed **{word}** from the word pool.")
 
 
