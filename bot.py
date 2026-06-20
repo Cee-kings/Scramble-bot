@@ -737,14 +737,15 @@ async def removeword(ctx, *, word: str):
     await ctx.send(f"🗑️ Removed **{word}** from this server's word pool.")
 
 
-@scramble.error
-@hint.error
-@addword.error
-@removeword.error
-@words.error
 async def manage_messages_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You need the **Manage Messages** permission to use this command.")
+
+scramble.error(manage_messages_error)
+hint.error(manage_messages_error)
+addword.error(manage_messages_error)
+removeword.error(manage_messages_error)
+words.error(manage_messages_error)
 
 
 
