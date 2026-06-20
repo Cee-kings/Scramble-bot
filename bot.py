@@ -197,12 +197,17 @@ async def run_challenge(ctx):
         pause_event.set()
         active_challenges[channel_id]["pause_event"] = pause_event
 
+        guild_id = str(ctx.guild.id)
+        custom = db_get_custom_words(guild_id)
+        custom_set = {w.lower() for w in custom}
+        random.shuffle(custom)
+        fill = [w for w in DEFAULT_WORDS if w.lower() not in custom_set]
+        random.shuffle(fill)
+        word_list = (custom + fill)[:CHALLENGE_WORDS]
+
         await ctx.send(
             f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
         )
-
-        pool = get_words(str(ctx.guild.id))
-        word_list = random.sample(pool, min(CHALLENGE_WORDS, len(pool)))
 
         for word_num, word in enumerate(word_list, 1):
             if channel_id not in active_challenges:
