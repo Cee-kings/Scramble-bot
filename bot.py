@@ -228,7 +228,7 @@ async def run_challenge(ctx):
                 if game and not word_event.is_set():
                     w = game["word"]
                     await ctx.channel.send(
-                        f"💡 **Auto-hint:** The word starts with **{w[0].upper()}** and has **{len(w)}** letters."
+                        f"💡 **Auto-hint:** The word starts with **{w[0].upper()}** and ends with **{w[-1].upper()}** — **{len(w)}** letters."
                     )
 
             guessed = await _wait_with_pause(
@@ -402,7 +402,7 @@ async def hint(ctx):
             )
             return
 
-    await ctx.send(f"💡 Hint: The word starts with **{word[0].upper()}** and has **{len(word)}** letters.")
+    await ctx.send(f"💡 Hint: The word starts with **{word[0].upper()}** and ends with **{word[-1].upper()}** — **{len(word)}** letters.")
 
 
 @bot.command(name="skip")
