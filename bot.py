@@ -10,9 +10,6 @@ from discord import app_commands
 from flask import Flask
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-GUILD_ID = 1489965395644387399          # guild to sync slash commands to
-TEST_GUILD = discord.Object(id=GUILD_ID)
-
 SCORES_FILE = "scores.json"
 SKIP_COOLDOWN_SECONDS = 60
 CHALLENGE_WORDS = 20
@@ -328,9 +325,9 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
 # ── on_ready — register slash commands ────────────────────────────────────────
 @client.event
 async def on_ready():
-    synced = await tree.sync(guild=TEST_GUILD)
+    synced = await tree.sync()
     print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print(f"Synced {len(synced)} slash command(s) to guild {GUILD_ID}.")
+    print(f"Synced {len(synced)} slash command(s) globally.")
 
 
 # ── on_message — handle replies and @mentions as guesses ──────────────────────
@@ -406,7 +403,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 # ── /scramble ─────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="scramble",
     description="Start a new unscramble round in this channel",
 )
@@ -447,7 +443,6 @@ async def cmd_scramble(interaction: discord.Interaction):
 
 # ── /guess (fallback slash command) ───────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="guess",
     description="Submit your answer for the current scramble word",
 )
@@ -476,7 +471,6 @@ async def cmd_guess(interaction: discord.Interaction, word: str):
 
 # ── /challenge ────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="challenge",
     description=f"Start a {CHALLENGE_WORDS}-word speed round ({CHALLENGE_WORD_TIMEOUT}s per word)",
 )
@@ -510,7 +504,6 @@ async def cmd_challenge(interaction: discord.Interaction):
 
 # ── /hint ─────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="hint",
     description="Get the first letter, last letter, and length of the current word",
 )
@@ -545,7 +538,6 @@ async def cmd_hint(interaction: discord.Interaction):
 
 # ── /skip ─────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="skip",
     description=f"Give up and reveal the current word ({SKIP_COOLDOWN_SECONDS}s cooldown per channel)",
 )
@@ -582,7 +574,6 @@ async def cmd_skip(interaction: discord.Interaction):
 
 # ── /end ──────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="end",
     description="Stop the current game or challenge early",
 )
@@ -614,7 +605,6 @@ async def cmd_end(interaction: discord.Interaction):
 
 # ── /pause ────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="pause",
     description="Freeze the challenge timer",
 )
@@ -643,7 +633,6 @@ async def cmd_pause(interaction: discord.Interaction):
 
 # ── /resume ───────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="resume",
     description="Unfreeze the challenge timer",
 )
@@ -672,7 +661,6 @@ async def cmd_resume(interaction: discord.Interaction):
 
 # ── /leaderboard ──────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="leaderboard",
     description="Show the top 10 players",
 )
@@ -701,7 +689,6 @@ async def cmd_leaderboard(interaction: discord.Interaction):
 
 # ── /stats ────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="stats",
     description="View a player's score, words solved, and rank",
 )
@@ -736,7 +723,6 @@ async def cmd_stats(interaction: discord.Interaction, member: discord.Member = N
 
 # ── /resetscores ──────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="resetscores",
     description="Permanently wipe all scores from the leaderboard (admin only)",
 )
@@ -756,7 +742,6 @@ async def cmd_resetscores(interaction: discord.Interaction, confirm: str):
 
 # ── /words ────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="words",
     description="List this server's custom word pool",
 )
@@ -774,7 +759,6 @@ async def cmd_words(interaction: discord.Interaction):
 
 # ── /wordcount ────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="wordcount",
     description="Show how many words are in this server's word pool",
 )
@@ -792,7 +776,6 @@ async def cmd_wordcount(interaction: discord.Interaction):
 
 # ── /addword ──────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="addword",
     description="Add a custom word to this server's word pool",
 )
@@ -827,7 +810,6 @@ async def cmd_addword(interaction: discord.Interaction, word: str):
 
 # ── /removeword ───────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="removeword",
     description="Remove a custom word from this server's word pool",
 )
@@ -853,7 +835,6 @@ async def cmd_removeword(interaction: discord.Interaction, word: str):
 
 # ── /clearwords ───────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="clearwords",
     description="Remove all custom words from this server's word pool",
 )
@@ -884,7 +865,6 @@ async def cmd_clearwords(interaction: discord.Interaction, confirm: str):
 
 # ── /help ─────────────────────────────────────────────────────────────────────
 @tree.command(
-    guild=TEST_GUILD,
     name="help",
     description="Show all bot commands",
 )
