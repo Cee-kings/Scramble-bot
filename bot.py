@@ -155,7 +155,8 @@ def scramble_word(word: str) -> str:
 
 
 # ── Client setup ───────────────────────────────────────────────────────────────
-# No privileged intents needed — Message Content intent removed.
+# No privileged intents needed.
+# Replies to the bot and @mentions deliver message content without Message Content intent.
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
@@ -171,9 +172,7 @@ async def _wait_with_pause(
     word_event, pause_event, timeout,
     game_dict=None, on_hint=None, hint_at=None,
 ):
-    """Pauseable countdown. Returns True if guessed, False if timed out.
-    Updates game_dict['elapsed'] each tick so /hint can read active elapsed time.
-    Calls on_hint() once when active elapsed time reaches hint_at seconds."""
+    """Pauseable countdown. Returns True if guessed, False if timed out."""
     elapsed = 0.0
     tick = 0.25
     hint_fired = False
@@ -191,9 +190,51 @@ async def _wait_with_pause(
     return False
 
 
+async def _apply_correct_guess(channel_id: int, user: discord.User | discord.Member) -> str:
+    """
+    Shared logic for a correct guess. Mutates active_games / active_challenges,
+    saves scores, and returns the public announcement string.
+    Caller is responsible for sending it.
+    """
+    game = active_games[channel_id]
+    user_id = str(user.id)
+    user_name = str(user)
+    display_name = user.display_name
+
+    if game.get("challenge"):
+        session = active_challenges.get(channel_id)
+        if not session:
+            return ""
+        active_games.pop(channel_id, None)
+        if user_id not in session["session_scores"]:
+            session["session_scores"][user_id] = {"name": user_name, "pts": 0}
+        session["session_scores"][user_id]["name"] = user_name
+        session["session_scores"][user_id]["pts"] += 10
+        session_pts = session["session_scores"][user_id]["pts"]
+        word_event = game.get("word_event")
+        if word_event:
+            word_event.set()
+        return (
+            f"✅ **{display_name}** got **{game['word']}**! "
+            f"+10 pts ({session_pts} this round)"
+        )
+    else:
+        scores = load_json(SCORES_FILE, {})
+        if user_id not in scores:
+            scores[user_id] = {"name": user_name, "score": 0}
+        scores[user_id]["name"] = user_name
+        scores[user_id]["score"] += 10
+        save_json(SCORES_FILE, scores)
+        total = scores[user_id]["score"]
+        active_games.pop(channel_id, None)
+        return (
+            f"🎉 **{display_name}** got it! The word was **{game['word']}**. "
+            f"+10 points! (Total: {total})"
+        )
+
+
 async def run_challenge(channel: discord.TextChannel, guild_id: str):
-    """Background task that drives a challenge round.
-    The /challenge handler sends the opening message and creates this task."""
+    """Background task that drives a challenge round."""
     channel_id = channel.id
     try:
         pause_event = asyncio.Event()
@@ -219,12 +260,15 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
                 "challenge": True,
                 "word_event": word_event,
                 "elapsed": 0.0,
+                "prompt_msg_id": None,   # filled in after send
             }
             active_games[channel_id] = game_dict
 
-            await channel.send(
-                f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!"
+            msg = await channel.send(
+                f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!\n"
+                f"Reply to this message or mention me with your answer!"
             )
+            game_dict["prompt_msg_id"] = msg.id  # store so reply detection works
 
             async def auto_hint(ch_id=channel_id, we=word_event):
                 game = active_games.get(ch_id)
@@ -289,6 +333,60 @@ async def on_ready():
     print(f"Synced {len(synced)} slash command(s) to guild {GUILD_ID}.")
 
 
+# ── on_message — handle replies and @mentions as guesses ──────────────────────
+@client.event
+async def on_message(message: discord.Message):
+    # Ignore bots
+    if message.author.bot:
+        return
+
+    channel_id = message.channel.id
+
+    # Determine if this message is a reply to the current word prompt
+    is_reply_to_prompt = (
+        message.reference is not None
+        and channel_id in active_games
+        and message.reference.message_id == active_games[channel_id].get("prompt_msg_id")
+    )
+
+    # Determine if the bot is mentioned
+    is_mention = client.user in message.mentions
+
+    if not is_reply_to_prompt and not is_mention:
+        return
+
+    if channel_id not in active_games:
+        # Mentioned but no game running — let them know
+        if is_mention:
+            await message.reply(
+                "No active game right now! Use `/scramble` to start one.",
+                mention_author=False,
+            )
+        return
+
+    # Extract guess text: strip bot mention(s) and surrounding whitespace
+    raw = message.content or ""
+    raw = raw.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "")
+    guess = raw.strip().lower()
+
+    if not guess:
+        return
+
+    game = active_games[channel_id]
+    if guess != game["word"].lower():
+        # Wrong — add a ❌ reaction so the channel isn't flooded with "wrong!" messages
+        try:
+            await message.add_reaction("❌")
+        except discord.HTTPException:
+            pass
+        return
+
+    # Correct guess — process and announce publicly
+    result = await _apply_correct_guess(channel_id, message.author)
+    if result:
+        await message.channel.send(result)
+
+
 # ── Global app-command error handler ──────────────────────────────────────────
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -331,15 +429,23 @@ async def cmd_scramble(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     word = random.choice(get_words(guild_id))
     scrambled = scramble_word(word)
-    active_games[channel_id] = {"word": word, "scrambled": scrambled}
 
     await interaction.response.send_message(
         f"🔀 Unscramble this word: **{scrambled}**\n"
-        f"Use `/guess word:<answer>` to win 10 points! Use `/hint` if you're stuck."
+        f"**Reply to this message** or **@mention me** with your answer to win 10 points!\n"
+        f"Use `/hint` if you're stuck, or `/guess` if you prefer slash commands."
     )
 
+    # Store the prompt message ID so reply detection works
+    prompt_msg = await interaction.original_response()
+    active_games[channel_id] = {
+        "word": word,
+        "scrambled": scrambled,
+        "prompt_msg_id": prompt_msg.id,
+    }
 
-# ── /guess ────────────────────────────────────────────────────────────────────
+
+# ── /guess (fallback slash command) ───────────────────────────────────────────
 @tree.command(
     guild=TEST_GUILD,
     name="guess",
@@ -361,41 +467,11 @@ async def cmd_guess(interaction: discord.Interaction, word: str):
         await interaction.response.send_message("❌ Wrong answer — keep trying!", ephemeral=True)
         return
 
-    user_id = str(interaction.user.id)
-    user_name = str(interaction.user)
-    display_name = interaction.user.display_name
-
-    if game.get("challenge"):
-        session = active_challenges.get(channel_id)
-        if session:
-            active_games.pop(channel_id, None)
-            if user_id not in session["session_scores"]:
-                session["session_scores"][user_id] = {"name": user_name, "pts": 0}
-            session["session_scores"][user_id]["name"] = user_name
-            session["session_scores"][user_id]["pts"] += 10
-            session_pts = session["session_scores"][user_id]["pts"]
-            await interaction.response.send_message(
-                f"✅ **{display_name}** got **{game['word']}**! "
-                f"+10 pts ({session_pts} this round)"
-            )
-            word_event = game.get("word_event")
-            if word_event:
-                word_event.set()
-        else:
-            await interaction.response.send_message("❌ No active challenge session.", ephemeral=True)
+    result = await _apply_correct_guess(channel_id, interaction.user)
+    if result:
+        await interaction.response.send_message(result)
     else:
-        scores = load_json(SCORES_FILE, {})
-        if user_id not in scores:
-            scores[user_id] = {"name": user_name, "score": 0}
-        scores[user_id]["name"] = user_name
-        scores[user_id]["score"] += 10
-        save_json(SCORES_FILE, scores)
-        total = scores[user_id]["score"]
-        active_games.pop(channel_id, None)
-        await interaction.response.send_message(
-            f"🎉 **{display_name}** got it! The word was **{game['word']}**. "
-            f"+10 points! (Total: {total})"
-        )
+        await interaction.response.send_message("Something went wrong processing your guess.", ephemeral=True)
 
 
 # ── /challenge ────────────────────────────────────────────────────────────────
@@ -424,7 +500,8 @@ async def cmd_challenge(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
 
     await interaction.response.send_message(
-        f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
+        f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**\n"
+        f"Reply to each word message or @mention me with your answer!"
     )
 
     task = asyncio.create_task(run_challenge(interaction.channel, guild_id))
@@ -813,16 +890,17 @@ async def cmd_clearwords(interaction: discord.Interaction, confirm: str):
 )
 async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎮 Unscramble Bot — Slash Commands",
+        title="🎮 Unscramble Bot — Commands",
         color=discord.Color.blurple(),
     )
     embed.add_field(
         name="💬 Everyone",
         value=(
+            "**Reply** to the word message or **@mention me** with your answer to guess!\n"
+            "`/guess word:<answer>` — slash command fallback\n"
             "`/leaderboard` — Top 10 players\n"
             "`/stats [member]` — View a player's score, words solved & rank\n"
-            "`/wordcount` — Total words in this server's pool\n"
-            "`/guess word:<answer>` — Submit your answer for the current word"
+            "`/wordcount` — Total words in this server's pool"
         ),
         inline=False,
     )
@@ -848,7 +926,7 @@ async def cmd_help(interaction: discord.Interaction):
         value="`/resetscores confirm:yes` — Wipe all scores",
         inline=False,
     )
-    embed.set_footer(text="Use /guess word:<answer> to score 10 points per round!")
+    embed.set_footer(text="Reply to the word message or @mention the bot to guess!")
     await interaction.response.send_message(embed=embed)
 
 
