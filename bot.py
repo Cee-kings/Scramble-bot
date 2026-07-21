@@ -152,9 +152,15 @@ def scramble_word(word: str) -> str:
 
 
 # ── Client setup ───────────────────────────────────────────────────────────────
-# No privileged intents needed.
-# Replies to the bot and @mentions deliver message content without Message Content intent.
+# Message Content intent is gated behind an env var so the bot can run
+# without it while awaiting Discord approval.
+# To enable free-text guessing:
+#   1. Turn on "Message Content Intent" in the Discord Developer Portal → Bot
+#   2. Set  MESSAGE_CONTENT_INTENT=true  in Replit Secrets and restart.
+# Until then the bot falls back to reply-to-prompt and @mention detection,
+# which Discord provides without the privileged intent.
 intents = discord.Intents.default()
+intents.message_content = os.environ.get("MESSAGE_CONTENT_INTENT", "").lower() == "true"
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -339,17 +345,29 @@ async def on_message(message: discord.Message):
 
     channel_id = message.channel.id
 
-    # Determine if this message is a reply to the current word prompt
+    # Determine trigger method ---------------------------------------------------
+    # Replies to the bot's word prompt and @mentions always carry content,
+    # even without the Message Content intent.
     is_reply_to_prompt = (
         message.reference is not None
         and channel_id in active_games
         and message.reference.message_id == active_games[channel_id].get("prompt_msg_id")
     )
-
-    # Determine if the bot is mentioned
     is_mention = client.user in message.mentions
 
-    if not is_reply_to_prompt and not is_mention:
+    # Free-text: message.content is non-empty only when the Message Content
+    # intent has been granted by Discord. When it hasn't, this is "" and the
+    # branch is never taken — the bot falls back to reply/mention only.
+    raw_content = message.content or ""
+    is_free_text = (
+        bool(raw_content)
+        and not is_reply_to_prompt
+        and not is_mention
+        and not raw_content.startswith("/")   # skip slash-command echoes
+        and channel_id in active_games
+    )
+
+    if not is_reply_to_prompt and not is_mention and not is_free_text:
         return
 
     if channel_id not in active_games:
@@ -361,17 +379,20 @@ async def on_message(message: discord.Message):
             )
         return
 
-    # Extract guess text: strip bot mention(s) and surrounding whitespace
-    raw = message.content or ""
-    raw = raw.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "")
-    guess = raw.strip().lower()
+    # Extract guess text --------------------------------------------------------
+    if is_free_text:
+        guess = raw_content.strip().lower()
+    else:
+        # Reply or mention: strip bot mention(s) before comparing
+        raw = raw_content.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "")
+        guess = raw.strip().lower()
 
     if not guess:
         return
 
     game = active_games[channel_id]
     if guess != game["word"].lower():
-        # Wrong — add a ❌ reaction so the channel isn't flooded with "wrong!" messages
+        # Wrong — ❌ reaction keeps the channel tidy
         try:
             await message.add_reaction("❌")
         except discord.HTTPException:
