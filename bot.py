@@ -3,15 +3,21 @@ import json
 import random
 import asyncio
 import threading
+import time
 import psycopg2
 import discord
-from discord.ext import commands
+from discord import app_commands
 from flask import Flask
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+GUILD_ID = 1489965395644387399          # guild to sync slash commands to
+TEST_GUILD = discord.Object(id=GUILD_ID)
 
 SCORES_FILE = "scores.json"
 SKIP_COOLDOWN_SECONDS = 60
 CHALLENGE_WORDS = 20
 CHALLENGE_WORD_TIMEOUT = 60
+HINT_UNLOCK_SECONDS = 40
 
 DEFAULT_WORDS = [
     "python", "discord", "scramble", "keyboard", "monitor", "network",
@@ -24,7 +30,7 @@ DEFAULT_WORDS = [
     "champion", "triumph", "victory", "courage", "wisdom", "justice",
 ]
 
-
+# ── JSON helpers ───────────────────────────────────────────────────────────────
 def load_json(path, default):
     try:
         if os.path.exists(path):
@@ -43,6 +49,7 @@ def save_json(path, data):
         print(f"[ERROR] Failed to save {path}: {e}")
 
 
+# ── Database ───────────────────────────────────────────────────────────────────
 def init_db():
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -138,7 +145,7 @@ def get_words(guild_id: str) -> list:
     return list(DEFAULT_WORDS)
 
 
-def scramble_word(word):
+def scramble_word(word: str) -> str:
     letters = list(word)
     while True:
         random.shuffle(letters)
@@ -147,31 +154,25 @@ def scramble_word(word):
             return scrambled
 
 
+# ── Client setup ───────────────────────────────────────────────────────────────
+# No privileged intents needed — Message Content intent removed.
 intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
-active_games = {}
-active_challenges = {}
-
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+# Game state
+active_games: dict[int, dict] = {}       # channel_id -> game dict
+active_challenges: dict[int, dict] = {}  # channel_id -> challenge dict
+skip_cooldowns: dict[int, float] = {}    # channel_id -> last-skip monotonic time
 
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    if isinstance(error, (commands.MissingPermissions, commands.CommandOnCooldown)):
-        return
-    print(f"[ERROR] Unhandled command error in '{ctx.command}': {error}")
-
-
-async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None, on_hint=None, hint_at=None):
-    """Wait for word_event with a pauseable countdown. Returns True if guessed, False if timed out.
-    Updates game_dict['elapsed'] each tick so !hint can read active elapsed time.
+# ── Shared game logic ──────────────────────────────────────────────────────────
+async def _wait_with_pause(
+    word_event, pause_event, timeout,
+    game_dict=None, on_hint=None, hint_at=None,
+):
+    """Pauseable countdown. Returns True if guessed, False if timed out.
+    Updates game_dict['elapsed'] each tick so /hint can read active elapsed time.
     Calls on_hint() once when active elapsed time reaches hint_at seconds."""
     elapsed = 0.0
     tick = 0.25
@@ -190,24 +191,21 @@ async def _wait_with_pause(word_event, pause_event, timeout, game_dict=None, on_
     return False
 
 
-async def run_challenge(ctx):
-    channel_id = ctx.channel.id
+async def run_challenge(channel: discord.TextChannel, guild_id: str):
+    """Background task that drives a challenge round.
+    The /challenge handler sends the opening message and creates this task."""
+    channel_id = channel.id
     try:
         pause_event = asyncio.Event()
         pause_event.set()
         active_challenges[channel_id]["pause_event"] = pause_event
 
-        guild_id = str(ctx.guild.id)
         custom = db_get_custom_words(guild_id)
         custom_set = {w.lower() for w in custom}
         random.shuffle(custom)
         fill = [w for w in DEFAULT_WORDS if w.lower() not in custom_set]
         random.shuffle(fill)
         word_list = (custom + fill)[:CHALLENGE_WORDS]
-
-        await ctx.send(
-            f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
-        )
 
         for word_num, word in enumerate(word_list, 1):
             if channel_id not in active_challenges:
@@ -224,31 +222,32 @@ async def run_challenge(ctx):
             }
             active_games[channel_id] = game_dict
 
-            await ctx.channel.send(
+            await channel.send(
                 f"🔀 Word {word_num}/{CHALLENGE_WORDS}: **{scrambled}** — {CHALLENGE_WORD_TIMEOUT}s!"
             )
 
-            async def auto_hint():
-                game = active_games.get(channel_id)
-                if game and not word_event.is_set():
+            async def auto_hint(ch_id=channel_id, we=word_event):
+                game = active_games.get(ch_id)
+                if game and not we.is_set():
                     w = game["word"]
-                    await ctx.channel.send(
-                        f"💡 **Auto-hint:** The word starts with **{w[0].upper()}** and ends with **{w[-1].upper()}** — **{len(w)}** letters."
+                    await channel.send(
+                        f"💡 **Auto-hint:** The word starts with **{w[0].upper()}** "
+                        f"and ends with **{w[-1].upper()}** — **{len(w)}** letters."
                     )
 
             guessed = await _wait_with_pause(
                 word_event, pause_event, CHALLENGE_WORD_TIMEOUT, game_dict,
-                on_hint=auto_hint, hint_at=HINT_UNLOCK_SECONDS
+                on_hint=auto_hint, hint_at=HINT_UNLOCK_SECONDS,
             )
             if not guessed:
                 active_games.pop(channel_id, None)
-                await ctx.channel.send(f"⏰ Nobody got it! The word was **{word}**.")
+                await channel.send(f"⏰ Nobody got it! The word was **{word}**.")
 
         session = active_challenges.pop(channel_id, None)
         active_games.pop(channel_id, None)
 
         if not session or not session["session_scores"]:
-            await ctx.channel.send("🏁 Challenge over! Nobody scored any points.")
+            await channel.send("🏁 Challenge over! Nobody scored any points.")
             return
 
         scores = load_json(SCORES_FILE, {})
@@ -262,7 +261,6 @@ async def run_challenge(ctx):
         sorted_session = sorted(
             session["session_scores"].items(), key=lambda x: x[1]["pts"], reverse=True
         )
-
         medals = ["🥇", "🥈", "🥉"]
         lines = []
         for i, (uid, data) in enumerate(sorted_session):
@@ -275,124 +273,177 @@ async def run_challenge(ctx):
             description=f"**{winner_name}** wins the round!\n\n" + "\n".join(lines),
             color=discord.Color.orange(),
         )
-        await ctx.channel.send(embed=embed)
+        await channel.send(embed=embed)
+
     except Exception as e:
         print(f"[ERROR] Challenge task crashed: {e}")
         active_challenges.pop(channel_id, None)
         active_games.pop(channel_id, None)
 
 
-@bot.command(name="challenge")
-@commands.has_permissions(manage_messages=True)
-async def challenge(ctx):
-    channel_id = ctx.channel.id
+# ── on_ready — register slash commands ────────────────────────────────────────
+@client.event
+async def on_ready():
+    synced = await tree.sync(guild=TEST_GUILD)
+    print(f"Logged in as {client.user} (ID: {client.user.id})")
+    print(f"Synced {len(synced)} slash command(s) to guild {GUILD_ID}.")
 
+
+# ── Global app-command error handler ──────────────────────────────────────────
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "You don't have permission to use this command.", ephemeral=True
+        )
+    else:
+        print(f"[ERROR] App command '{interaction.command}': {error}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── /scramble ─────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="scramble",
+    description="Start a new unscramble round in this channel",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_scramble(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
     if channel_id in active_challenges:
-        await ctx.send("A challenge is already running in this channel!")
-        return
-    if channel_id in active_games:
-        await ctx.send("Finish the current `!scramble` game first before starting a challenge.")
-        return
-
-    active_challenges[channel_id] = {"session_scores": {}}
-
-    task = asyncio.create_task(run_challenge(ctx))
-    active_challenges[channel_id]["task"] = task
-
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    await bot.process_commands(message)
-
-    if message.content.startswith("!"):
-        return
-
-    channel_id = message.channel.id
-    guess = message.content.strip().lower()
-
-    # ── Scramble guess handling ──
-    try:
-        if channel_id in active_games:
-            game = active_games[channel_id]
-            if guess == game["word"].lower():
-                user_id = str(message.author.id)
-                user_name = str(message.author)
-
-                if game.get("challenge"):
-                    session = active_challenges.get(channel_id)
-                    if session:
-                        active_games.pop(channel_id, None)
-                        if user_id not in session["session_scores"]:
-                            session["session_scores"][user_id] = {"name": user_name, "pts": 0}
-                        session["session_scores"][user_id]["name"] = user_name
-                        session["session_scores"][user_id]["pts"] += 10
-                        session_pts = session["session_scores"][user_id]["pts"]
-                        await message.channel.send(
-                            f"✅ **{message.author.display_name}** got **{game['word']}**! "
-                            f"+10 pts ({session_pts} this round)"
-                        )
-                        word_event = game.get("word_event")
-                        if word_event:
-                            word_event.set()
-                else:
-                    scores = load_json(SCORES_FILE, {})
-                    if user_id not in scores:
-                        scores[user_id] = {"name": user_name, "score": 0}
-                    scores[user_id]["name"] = user_name
-                    scores[user_id]["score"] += 10
-                    save_json(SCORES_FILE, scores)
-                    total = scores[user_id]["score"]
-                    active_games.pop(channel_id, None)
-                    await message.channel.send(
-                        f"🎉 **{message.author.display_name}** got it! The word was **{game['word']}**. "
-                        f"+10 points! (Total: {total})"
-                    )
-    except Exception as e:
-        print(f"[ERROR] on_message scramble handler: {e}")
-
-
-
-@challenge.error
-async def challenge_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to use this command.")
-
-
-@bot.command(name="scramble")
-@commands.has_permissions(manage_messages=True)
-async def scramble(ctx):
-    channel_id = ctx.channel.id
-    if channel_id in active_challenges:
-        await ctx.send("A challenge is running! Wait for it to finish.")
+        await interaction.response.send_message(
+            "A challenge is running! Wait for it to finish.", ephemeral=True
+        )
         return
     if channel_id in active_games:
         game = active_games[channel_id]
-        await ctx.send(
-            f"A game is already running! The scrambled word is: **{game['scrambled']}**"
+        await interaction.response.send_message(
+            f"A game is already running! The scrambled word is: **{game['scrambled']}**",
+            ephemeral=True,
         )
         return
 
-    word = random.choice(get_words(str(ctx.guild.id)))
+    guild_id = str(interaction.guild_id)
+    word = random.choice(get_words(guild_id))
     scrambled = scramble_word(word)
     active_games[channel_id] = {"word": word, "scrambled": scrambled}
 
-    await ctx.send(
+    await interaction.response.send_message(
         f"🔀 Unscramble this word: **{scrambled}**\n"
-        f"Type the answer in chat to win 10 points! Use `!hint` if you're stuck."
+        f"Use `/guess word:<answer>` to win 10 points! Use `/hint` if you're stuck."
     )
 
 
-HINT_UNLOCK_SECONDS = 40
+# ── /guess ────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="guess",
+    description="Submit your answer for the current scramble word",
+)
+@app_commands.describe(word="Your answer")
+async def cmd_guess(interaction: discord.Interaction, word: str):
+    channel_id = interaction.channel_id
+    guess = word.strip().lower()
 
-@bot.command(name="hint")
-@commands.has_permissions(manage_messages=True)
-async def hint(ctx):
-    channel_id = ctx.channel.id
     if channel_id not in active_games:
-        await ctx.send("No active game! Start one with `!scramble`.")
+        await interaction.response.send_message(
+            "No active game in this channel! Start one with `/scramble`.", ephemeral=True
+        )
+        return
+
+    game = active_games[channel_id]
+    if guess != game["word"].lower():
+        await interaction.response.send_message("❌ Wrong answer — keep trying!", ephemeral=True)
+        return
+
+    user_id = str(interaction.user.id)
+    user_name = str(interaction.user)
+    display_name = interaction.user.display_name
+
+    if game.get("challenge"):
+        session = active_challenges.get(channel_id)
+        if session:
+            active_games.pop(channel_id, None)
+            if user_id not in session["session_scores"]:
+                session["session_scores"][user_id] = {"name": user_name, "pts": 0}
+            session["session_scores"][user_id]["name"] = user_name
+            session["session_scores"][user_id]["pts"] += 10
+            session_pts = session["session_scores"][user_id]["pts"]
+            await interaction.response.send_message(
+                f"✅ **{display_name}** got **{game['word']}**! "
+                f"+10 pts ({session_pts} this round)"
+            )
+            word_event = game.get("word_event")
+            if word_event:
+                word_event.set()
+        else:
+            await interaction.response.send_message("❌ No active challenge session.", ephemeral=True)
+    else:
+        scores = load_json(SCORES_FILE, {})
+        if user_id not in scores:
+            scores[user_id] = {"name": user_name, "score": 0}
+        scores[user_id]["name"] = user_name
+        scores[user_id]["score"] += 10
+        save_json(SCORES_FILE, scores)
+        total = scores[user_id]["score"]
+        active_games.pop(channel_id, None)
+        await interaction.response.send_message(
+            f"🎉 **{display_name}** got it! The word was **{game['word']}**. "
+            f"+10 points! (Total: {total})"
+        )
+
+
+# ── /challenge ────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="challenge",
+    description=f"Start a {CHALLENGE_WORDS}-word speed round ({CHALLENGE_WORD_TIMEOUT}s per word)",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_challenge(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+
+    if channel_id in active_challenges:
+        await interaction.response.send_message(
+            "A challenge is already running in this channel!", ephemeral=True
+        )
+        return
+    if channel_id in active_games:
+        await interaction.response.send_message(
+            "Finish the current `/scramble` game first before starting a challenge.",
+            ephemeral=True,
+        )
+        return
+
+    active_challenges[channel_id] = {"session_scores": {}}
+    guild_id = str(interaction.guild_id)
+
+    await interaction.response.send_message(
+        f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**"
+    )
+
+    task = asyncio.create_task(run_challenge(interaction.channel, guild_id))
+    active_challenges[channel_id]["task"] = task
+
+
+# ── /hint ─────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="hint",
+    description="Get the first letter, last letter, and length of the current word",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_hint(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    if channel_id not in active_games:
+        await interaction.response.send_message(
+            "No active game! Start one with `/scramble`.", ephemeral=True
+        )
         return
 
     game = active_games[channel_id]
@@ -402,44 +453,65 @@ async def hint(ctx):
         elapsed = game.get("elapsed", 0.0)
         remaining = HINT_UNLOCK_SECONDS - elapsed
         if remaining > 0:
-            await ctx.send(
-                f"🔒 Hint unlocks after **{HINT_UNLOCK_SECONDS}s** — available in **{int(remaining)+1}s**."
+            await interaction.response.send_message(
+                f"🔒 Hint unlocks after **{HINT_UNLOCK_SECONDS}s** — "
+                f"available in **{int(remaining)+1}s**.",
+                ephemeral=True,
             )
             return
 
-    await ctx.send(f"💡 Hint: The word starts with **{word[0].upper()}** and ends with **{word[-1].upper()}** — **{len(word)}** letters.")
+    await interaction.response.send_message(
+        f"💡 Hint: The word starts with **{word[0].upper()}** "
+        f"and ends with **{word[-1].upper()}** — **{len(word)}** letters."
+    )
 
 
-@bot.command(name="skip")
-@commands.has_permissions(manage_messages=True)
-@commands.cooldown(1, SKIP_COOLDOWN_SECONDS, commands.BucketType.channel)
-async def skip(ctx):
-    channel_id = ctx.channel.id
+# ── /skip ─────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="skip",
+    description=f"Give up and reveal the current word ({SKIP_COOLDOWN_SECONDS}s cooldown per channel)",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_skip(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+
     if channel_id in active_challenges:
-        await ctx.send("Can't skip during a challenge — just keep guessing!")
+        await interaction.response.send_message(
+            "Can't skip during a challenge — just keep guessing!", ephemeral=True
+        )
         return
     if channel_id not in active_games:
-        await ctx.send("No active game! Start one with `!scramble`.")
+        await interaction.response.send_message(
+            "No active game! Start one with `/scramble`.", ephemeral=True
+        )
         return
 
-    word = active_games[channel_id]["word"]
-    del active_games[channel_id]
-    await ctx.send(f"⏭️ Skipped! The word was **{word}**. Start a new round with `!scramble`.")
+    last_skip = skip_cooldowns.get(channel_id, 0.0)
+    elapsed_since = time.monotonic() - last_skip
+    if elapsed_since < SKIP_COOLDOWN_SECONDS:
+        remaining = int(SKIP_COOLDOWN_SECONDS - elapsed_since) + 1
+        await interaction.response.send_message(
+            f"⏳ Skip is on cooldown. Try again in **{remaining}s**.", ephemeral=True
+        )
+        return
+
+    word = active_games.pop(channel_id)["word"]
+    skip_cooldowns[channel_id] = time.monotonic()
+    await interaction.response.send_message(
+        f"⏭️ Skipped! The word was **{word}**. Start a new round with `/scramble`."
+    )
 
 
-@skip.error
-async def skip_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to use this command.")
-    elif isinstance(error, commands.CommandOnCooldown):
-        remaining = round(error.retry_after)
-        await ctx.send(f"⏳ Skip is on cooldown. Try again in **{remaining}s**.")
-
-
-@bot.command(name="end")
-@commands.has_permissions(manage_messages=True)
-async def end(ctx):
-    channel_id = ctx.channel.id
+# ── /end ──────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="end",
+    description="Stop the current game or challenge early",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_end(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
 
     if channel_id in active_challenges:
         session = active_challenges.pop(channel_id, None)
@@ -450,82 +522,94 @@ async def end(ctx):
         msg = "🛑 Challenge ended early."
         if word:
             msg += f" The current word was **{word}**."
-        await ctx.send(msg)
+        await interaction.response.send_message(msg)
         return
 
     if channel_id in active_games:
         word = active_games.pop(channel_id)["word"]
-        await ctx.send(f"🛑 Game ended. The word was **{word}**.")
+        await interaction.response.send_message(f"🛑 Game ended. The word was **{word}**.")
         return
 
-    await ctx.send("There's no active game or challenge in this channel.")
+    await interaction.response.send_message(
+        "There's no active game or challenge in this channel.", ephemeral=True
+    )
 
 
-@end.error
-async def end_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to end a game.")
-
-
-@bot.command(name="pause")
-@commands.has_permissions(manage_messages=True)
-async def pause(ctx):
-    channel_id = ctx.channel.id
+# ── /pause ────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="pause",
+    description="Freeze the challenge timer",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_pause(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
     session = active_challenges.get(channel_id)
     if not session:
-        await ctx.send("No challenge is running in this channel.")
+        await interaction.response.send_message(
+            "No challenge is running in this channel.", ephemeral=True
+        )
         return
     pause_event = session.get("pause_event")
     if pause_event is None or not pause_event.is_set():
-        await ctx.send("The challenge is already paused. Use `!resume` to continue.")
+        await interaction.response.send_message(
+            "The challenge is already paused. Use `/resume` to continue.", ephemeral=True
+        )
         return
     pause_event.clear()
     game = active_games.get(channel_id)
     scrambled = game["scrambled"] if game else "?"
-    await ctx.send(f"⏸️ Challenge paused! Timer frozen on **{scrambled}**. Use `!resume` when ready.")
+    await interaction.response.send_message(
+        f"⏸️ Challenge paused! Timer frozen on **{scrambled}**. Use `/resume` when ready."
+    )
 
 
-@pause.error
-async def pause_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to pause a challenge.")
-
-
-@bot.command(name="resume")
-@commands.has_permissions(manage_messages=True)
-async def resume(ctx):
-    channel_id = ctx.channel.id
+# ── /resume ───────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="resume",
+    description="Unfreeze the challenge timer",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_resume(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
     session = active_challenges.get(channel_id)
     if not session:
-        await ctx.send("No challenge is running in this channel.")
+        await interaction.response.send_message(
+            "No challenge is running in this channel.", ephemeral=True
+        )
         return
     pause_event = session.get("pause_event")
     if pause_event is None or pause_event.is_set():
-        await ctx.send("The challenge isn't paused.")
+        await interaction.response.send_message(
+            "The challenge isn't paused.", ephemeral=True
+        )
         return
     pause_event.set()
     game = active_games.get(channel_id)
     scrambled = game["scrambled"] if game else "?"
-    await ctx.send(f"▶️ Challenge resumed! Current word: **{scrambled}** — timer is running!")
+    await interaction.response.send_message(
+        f"▶️ Challenge resumed! Current word: **{scrambled}** — timer is running!"
+    )
 
 
-@resume.error
-async def resume_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to resume a challenge.")
-
-
-@bot.command(name="leaderboard")
-async def leaderboard(ctx):
+# ── /leaderboard ──────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="leaderboard",
+    description="Show the top 10 players",
+)
+async def cmd_leaderboard(interaction: discord.Interaction):
     scores = load_json(SCORES_FILE, {})
     if not scores:
-        await ctx.send("No scores yet! Start a game with `!scramble`.")
+        await interaction.response.send_message(
+            "No scores yet! Start a game with `/scramble`.", ephemeral=True
+        )
         return
 
     sorted_scores = sorted(scores.values(), key=lambda x: x["score"], reverse=True)[:10]
-    lines = []
     medals = ["🥇", "🥈", "🥉"]
-
+    lines = []
     for i, entry in enumerate(sorted_scores):
         prefix = medals[i] if i < 3 else f"{i + 1}."
         lines.append(f"{prefix} **{entry['name']}** — {entry['score']} pts")
@@ -535,23 +619,30 @@ async def leaderboard(ctx):
         description="\n".join(lines),
         color=discord.Color.gold(),
     )
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="stats")
-async def stats(ctx, member: discord.Member = None):
-    member = member or ctx.author
+# ── /stats ────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="stats",
+    description="View a player's score, words solved, and rank",
+)
+@app_commands.describe(member="The player to look up (defaults to you)")
+async def cmd_stats(interaction: discord.Interaction, member: discord.Member = None):
+    member = member or interaction.user
     scores = load_json(SCORES_FILE, {})
     user_id = str(member.id)
 
     if user_id not in scores:
-        await ctx.send(f"**{member.display_name}** hasn't solved any words yet!")
+        await interaction.response.send_message(
+            f"**{member.display_name}** hasn't solved any words yet!", ephemeral=True
+        )
         return
 
     entry = scores[user_id]
     score = entry["score"]
     words_solved = score // 10
-
     sorted_ids = sorted(scores, key=lambda k: scores[k]["score"], reverse=True)
     rank = sorted_ids.index(user_id) + 1
 
@@ -563,192 +654,205 @@ async def stats(ctx, member: discord.Member = None):
     embed.add_field(name="Words Solved", value=str(words_solved), inline=True)
     embed.add_field(name="Rank", value=f"#{rank} of {len(scores)}", inline=True)
     embed.set_thumbnail(url=member.display_avatar.url)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="resetscores")
-@commands.has_permissions(administrator=True)
-async def resetscores(ctx):
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
-
-    await ctx.send(
-        "⚠️ This will permanently wipe **all scores**. Type `CONFIRM` to proceed or anything else to cancel."
+# ── /resetscores ──────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="resetscores",
+    description="Permanently wipe all scores from the leaderboard (admin only)",
+)
+@app_commands.describe(confirm="Type 'yes' to confirm — this cannot be undone")
+@app_commands.default_permissions(administrator=True)
+async def cmd_resetscores(interaction: discord.Interaction, confirm: str):
+    if confirm.strip().lower() != "yes":
+        await interaction.response.send_message(
+            "Reset cancelled. Pass `confirm:yes` to confirm.", ephemeral=True
+        )
+        return
+    save_json(SCORES_FILE, {})
+    await interaction.response.send_message(
+        "🗑️ All scores have been reset. The leaderboard is now empty."
     )
 
-    try:
-        reply = await bot.wait_for("message", check=check, timeout=30)
-    except Exception:
-        await ctx.send("Reset cancelled — timed out.")
+
+# ── /words ────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="words",
+    description="List this server's custom word pool",
+)
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_words(interaction: discord.Interaction):
+    custom = db_get_custom_words(str(interaction.guild_id))
+    if not custom:
+        await interaction.response.send_message(
+            "No custom words yet! Add some with `/addword`.", ephemeral=True
+        )
+        return
+    word_list = ", ".join(f"**{w}**" for w in custom)
+    await interaction.response.send_message(f"📝 Custom words ({len(custom)}): {word_list}")
+
+
+# ── /wordcount ────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="wordcount",
+    description="Show how many words are in this server's word pool",
+)
+async def cmd_wordcount(interaction: discord.Interaction):
+    custom = db_get_custom_words(str(interaction.guild_id))
+    if custom:
+        await interaction.response.send_message(
+            f"📚 Word pool: **{len(custom)} custom words** (only your server's words are used)"
+        )
+    else:
+        await interaction.response.send_message(
+            f"📚 Word pool: **{len(DEFAULT_WORDS)} built-in words** (no custom words set for this server)"
+        )
+
+
+# ── /addword ──────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="addword",
+    description="Add a custom word to this server's word pool",
+)
+@app_commands.describe(word="The word to add (3+ letters)")
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_addword(interaction: discord.Interaction, word: str):
+    word = word.strip().lower()
+    if len(word) < 3:
+        await interaction.response.send_message(
+            "Words must be at least 3 characters long.", ephemeral=True
+        )
         return
 
-    if reply.content.strip() != "CONFIRM":
-        await ctx.send("Reset cancelled.")
+    guild_id = str(interaction.guild_id)
+    if word in DEFAULT_WORDS:
+        await interaction.response.send_message(
+            f"**{word}** is already a built-in word.", ephemeral=True
+        )
         return
 
-    save_json(SCORES_FILE, {})
-    await ctx.send("🗑️ All scores have been reset. The leaderboard is now empty.")
+    added = db_add_custom_word(guild_id, word, str(interaction.user))
+    if not added:
+        await interaction.response.send_message(
+            f"**{word}** is already in the custom word pool.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"✅ Added **{word}** to this server's word pool. (Pool size: {len(get_words(guild_id))})"
+    )
 
 
-@resetscores.error
-async def resetscores_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Administrator** permission to reset scores.")
+# ── /removeword ───────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="removeword",
+    description="Remove a custom word from this server's word pool",
+)
+@app_commands.describe(word="The word to remove")
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_removeword(interaction: discord.Interaction, word: str):
+    word = word.strip().lower()
+    if word in DEFAULT_WORDS:
+        await interaction.response.send_message(
+            f"**{word}** is a built-in word and cannot be removed.", ephemeral=True
+        )
+        return
+
+    removed = db_remove_custom_word(str(interaction.guild_id), word)
+    if not removed:
+        await interaction.response.send_message(
+            f"**{word}** is not in this server's custom word pool.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(f"🗑️ Removed **{word}** from this server's word pool.")
 
 
-@bot.command(name="help")
-async def help_command(ctx):
+# ── /clearwords ───────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="clearwords",
+    description="Remove all custom words from this server's word pool",
+)
+@app_commands.describe(confirm="Type 'yes' to confirm — this cannot be undone")
+@app_commands.default_permissions(manage_messages=True)
+async def cmd_clearwords(interaction: discord.Interaction, confirm: str):
+    guild_id = str(interaction.guild_id)
+    custom = db_get_custom_words(guild_id)
+    if not custom:
+        await interaction.response.send_message(
+            "There are no custom words to clear.", ephemeral=True
+        )
+        return
+    if confirm.strip().lower() != "yes":
+        await interaction.response.send_message(
+            f"This will remove all **{len(custom)} custom words**. "
+            f"Pass `confirm:yes` to proceed.",
+            ephemeral=True,
+        )
+        return
+
+    deleted = db_clear_custom_words(guild_id)
+    await interaction.response.send_message(
+        f"🗑️ Cleared {deleted} custom word(s). "
+        f"Rounds will now use the {len(DEFAULT_WORDS)} built-in words."
+    )
+
+
+# ── /help ─────────────────────────────────────────────────────────────────────
+@tree.command(
+    guild=TEST_GUILD,
+    name="help",
+    description="Show all bot commands",
+)
+async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🎮 Unscramble Bot — Commands",
+        title="🎮 Unscramble Bot — Slash Commands",
         color=discord.Color.blurple(),
     )
     embed.add_field(
         name="💬 Everyone",
         value=(
-            "`!leaderboard` — Top 10 players\n"
-            "`!stats [@user]` — View a player's score, words solved & rank\n"
-            "`!wordcount` — Total words in this server's pool\n"
-            "Just type in chat to guess the current word!"
+            "`/leaderboard` — Top 10 players\n"
+            "`/stats [member]` — View a player's score, words solved & rank\n"
+            "`/wordcount` — Total words in this server's pool\n"
+            "`/guess word:<answer>` — Submit your answer for the current word"
         ),
         inline=False,
     )
     embed.add_field(
         name="🎯 Manage Messages",
         value=(
-            "`!scramble` — Start a new word game\n"
-            "`!challenge` — 20-word speed round, 60s per word\n"
-            "`!hint` — First & last letter + word length (instant in solo, unlocks at 40s in challenge)\n"
-            "`!skip` — Give up and reveal the word (60s cooldown)\n"
-            "`!pause` — Freeze the challenge timer\n"
-            "`!resume` — Unfreeze the challenge timer\n"
-            "`!end` — Stop the current game or challenge early\n"
-            "`!words` — List this server's custom words\n"
-            "`!addword <word>` — Add a custom word\n"
-            "`!removeword <word>` — Remove a custom word\n"
-            "`!clearwords` — Clear all custom words"
+            "`/scramble` — Start a new word game\n"
+            "`/challenge` — 20-word speed round, 60s per word\n"
+            "`/hint` — First & last letter + word length (instant in solo, unlocks at 40s in challenge)\n"
+            "`/skip` — Give up and reveal the word (60s cooldown)\n"
+            "`/pause` — Freeze the challenge timer\n"
+            "`/resume` — Unfreeze the challenge timer\n"
+            "`/end` — Stop the current game or challenge early\n"
+            "`/words` — List this server's custom words\n"
+            "`/addword word:<word>` — Add a custom word\n"
+            "`/removeword word:<word>` — Remove a custom word\n"
+            "`/clearwords confirm:yes` — Clear all custom words"
         ),
         inline=False,
     )
     embed.add_field(
         name="🔐 Admin",
-        value="`!resetscores` — Wipe all scores",
+        value="`/resetscores confirm:yes` — Wipe all scores",
         inline=False,
     )
-    embed.set_footer(text="Type the answer in chat (no prefix) to score 10 points!")
-    await ctx.send(embed=embed)
+    embed.set_footer(text="Use /guess word:<answer> to score 10 points per round!")
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="clearwords")
-@commands.has_permissions(manage_messages=True)
-async def clearwords(ctx):
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
-
-    guild_id = str(ctx.guild.id)
-    custom = db_get_custom_words(guild_id)
-    if not custom:
-        await ctx.send("There are no custom words to clear.")
-        return
-
-    await ctx.send(
-        f"⚠️ This will remove all **{len(custom)} custom words**. Type `CONFIRM` to proceed or anything else to cancel."
-    )
-
-    try:
-        reply = await bot.wait_for("message", check=check, timeout=30)
-    except Exception:
-        await ctx.send("Clear cancelled — timed out.")
-        return
-
-    if reply.content.strip() != "CONFIRM":
-        await ctx.send("Clear cancelled.")
-        return
-
-    deleted = db_clear_custom_words(guild_id)
-    await ctx.send(f"🗑️ Cleared {deleted} custom word(s). Rounds will now use the {len(DEFAULT_WORDS)} built-in words.")
-
-
-@clearwords.error
-async def clearwords_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to clear custom words.")
-
-
-@bot.command(name="wordcount")
-async def wordcount(ctx):
-    custom = db_get_custom_words(str(ctx.guild.id))
-    if custom:
-        await ctx.send(
-            f"📚 Word pool: **{len(custom)} custom words** (only your server's words are used)"
-        )
-    else:
-        await ctx.send(
-            f"📚 Word pool: **{len(DEFAULT_WORDS)} built-in words** (no custom words set for this server)"
-        )
-
-
-@bot.command(name="words")
-@commands.has_permissions(manage_messages=True)
-async def words(ctx):
-    custom = db_get_custom_words(str(ctx.guild.id))
-    if not custom:
-        await ctx.send("No custom words yet! Add some with `!addword <word>`.")
-        return
-
-    word_list = ", ".join(f"**{w}**" for w in custom)
-    await ctx.send(f"📝 Custom words ({len(custom)}): {word_list}")
-
-
-@bot.command(name="addword")
-@commands.has_permissions(manage_messages=True)
-async def addword(ctx, *, word: str):
-    word = word.strip().lower()
-    if len(word) < 3:
-        await ctx.send("Words must be at least 3 characters long.")
-        return
-
-    guild_id = str(ctx.guild.id)
-    if word in DEFAULT_WORDS:
-        await ctx.send(f"**{word}** is already a built-in word.")
-        return
-
-    added = db_add_custom_word(guild_id, word, str(ctx.author))
-    if not added:
-        await ctx.send(f"**{word}** is already in the custom word pool.")
-        return
-
-    await ctx.send(f"✅ Added **{word}** to this server's word pool. (Pool size: {len(get_words(guild_id))})")
-
-
-@bot.command(name="removeword")
-@commands.has_permissions(manage_messages=True)
-async def removeword(ctx, *, word: str):
-    word = word.strip().lower()
-
-    if word in DEFAULT_WORDS:
-        await ctx.send(f"**{word}** is a built-in word and cannot be removed.")
-        return
-
-    removed = db_remove_custom_word(str(ctx.guild.id), word)
-    if not removed:
-        await ctx.send(f"**{word}** is not in this server's custom word pool.")
-        return
-
-    await ctx.send(f"🗑️ Removed **{word}** from this server's word pool.")
-
-
-async def manage_messages_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Messages** permission to use this command.")
-
-scramble.error(manage_messages_error)
-hint.error(manage_messages_error)
-addword.error(manage_messages_error)
-removeword.error(manage_messages_error)
-words.error(manage_messages_error)
-
-
-
+# ── Keepalive server ───────────────────────────────────────────────────────────
 keepalive = Flask(__name__)
 
 
@@ -761,10 +865,11 @@ def run_keepalive():
     keepalive.run(host="0.0.0.0", port=8000)
 
 
+# ── Entry point ────────────────────────────────────────────────────────────────
 token = os.environ.get("DISCORD_TOKEN")
 if not token:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set.")
 
 init_db()
 threading.Thread(target=run_keepalive, daemon=True).start()
-bot.run(token)
+client.run(token)
