@@ -170,7 +170,7 @@ active_challenges: dict[int, dict] = {}   # channel_id -> challenge dict
 skip_cooldowns: dict[int, float] = {}     # channel_id -> last-skip monotonic time
 challenge_just_ended: dict[int, float] = {}  # channel_id -> monotonic time challenge ended
 
-CHALLENGE_END_GRACE = 12  # seconds to suppress "no active game" after a challenge finishes
+CHALLENGE_END_GRACE = 30  # seconds to suppress "no active game" after a challenge finishes
 
 
 # ── Shared game logic ──────────────────────────────────────────────────────────
@@ -336,6 +336,7 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
         print(f"[ERROR] Challenge task crashed: {e}")
         active_challenges.pop(channel_id, None)
         active_games.pop(channel_id, None)
+        challenge_just_ended[channel_id] = time.monotonic()
 
 
 # ── on_ready — register slash commands ────────────────────────────────────────
@@ -623,6 +624,7 @@ async def cmd_end(interaction: discord.Interaction):
     if channel_id in active_challenges:
         session = active_challenges.pop(channel_id, None)
         game = active_games.pop(channel_id, None)
+        challenge_just_ended[channel_id] = time.monotonic()
         if session and session.get("task"):
             session["task"].cancel()
         word = game["word"] if game else None
