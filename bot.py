@@ -165,9 +165,12 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # Game state
-active_games: dict[int, dict] = {}       # channel_id -> game dict
-active_challenges: dict[int, dict] = {}  # channel_id -> challenge dict
-skip_cooldowns: dict[int, float] = {}    # channel_id -> last-skip monotonic time
+active_games: dict[int, dict] = {}         # channel_id -> game dict
+active_challenges: dict[int, dict] = {}   # channel_id -> challenge dict
+skip_cooldowns: dict[int, float] = {}     # channel_id -> last-skip monotonic time
+challenge_just_ended: dict[int, float] = {}  # channel_id -> monotonic time challenge ended
+
+CHALLENGE_END_GRACE = 12  # seconds to suppress "no active game" after a challenge finishes
 
 
 # ── Shared game logic ──────────────────────────────────────────────────────────
@@ -255,6 +258,12 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
             if channel_id not in active_challenges:
                 break
 
+            # Wait 6 seconds between words (not before the very first one)
+            if word_num > 1:
+                await asyncio.sleep(6)
+                if channel_id not in active_challenges:
+                    break
+
             scrambled = scramble_word(word)
             word_event = asyncio.Event()
             game_dict = {
@@ -292,6 +301,7 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
 
         session = active_challenges.pop(channel_id, None)
         active_games.pop(channel_id, None)
+        challenge_just_ended[channel_id] = time.monotonic()
 
         if not session or not session["session_scores"]:
             await channel.send("🏁 Challenge over! Nobody scored any points.")
@@ -371,12 +381,16 @@ async def on_message(message: discord.Message):
         return
 
     if channel_id not in active_games:
-        # Mentioned but no game running — let them know
+        # Mentioned but no game running — let them know, unless a challenge
+        # just finished in this channel (suppress for a grace period).
         if is_mention:
-            await message.reply(
-                "No active game right now! Use `/scramble` to start one.",
-                mention_author=False,
-            )
+            ended_at = challenge_just_ended.get(channel_id)
+            in_grace = ended_at is not None and (time.monotonic() - ended_at) < CHALLENGE_END_GRACE
+            if not in_grace:
+                await message.reply(
+                    "No active game right now! Use `/scramble` to start one.",
+                    mention_author=False,
+                )
         return
 
     # Extract guess text --------------------------------------------------------
@@ -448,9 +462,10 @@ async def cmd_scramble(interaction: discord.Interaction):
     scrambled = scramble_word(word)
 
     await interaction.response.send_message(
-        f"🔀 Unscramble this word: **{scrambled}**\n"
-        f"**Reply to this message** or **@mention me** with your answer to win 10 points!\n"
-        f"Use `/hint` if you're stuck, or `/guess` if you prefer slash commands."
+        f"🎮 **Unscramble the word!** I'll give you a jumbled word — figure out what it is and "
+        f"reply to this message (or @mention me) with your answer to earn **10 points**. "
+        f"Use `/hint` for a clue or `/skip` to reveal it.\n\n"
+        f"🔀 Unscramble this: **{scrambled}**"
     )
 
     # Store the prompt message ID so reply detection works
@@ -515,8 +530,11 @@ async def cmd_challenge(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
 
     await interaction.response.send_message(
-        f"⚡ **Challenge started! {CHALLENGE_WORDS} words — {CHALLENGE_WORD_TIMEOUT}s per word!**\n"
-        f"Reply to each word message or @mention me with your answer!"
+        f"⚡ **Challenge Mode!** I'll post **{CHALLENGE_WORDS} scrambled words** one after another. "
+        f"Unscramble each word and reply to its message (or @mention me) with your answer — "
+        f"you have **{CHALLENGE_WORD_TIMEOUT}s** per word and earn **10 points** per correct guess. "
+        f"Highest score at the end wins!\n\n"
+        f"🚀 Get ready — first word coming up!"
     )
 
     task = asyncio.create_task(run_challenge(interaction.channel, guild_id))
