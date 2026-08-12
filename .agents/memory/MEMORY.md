@@ -1,0 +1,1 @@
+- [Discord channel access](discord-channel-access.md) — A connected bot can still fail in individual servers or channels when Discord permissions are missing.

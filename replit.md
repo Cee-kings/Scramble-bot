@@ -13,7 +13,7 @@ All commands are Discord slash commands — no prefix (!) commands, no Message C
 python bot.py
 ```
 
-On startup the bot syncs all slash commands to guild `1489965395644387399` for instant availability.
+On startup the bot syncs all slash commands globally and to every server it has joined for immediate availability.
 
 ## Required secrets
 - `DISCORD_TOKEN` — your Discord bot token (required)
@@ -25,6 +25,10 @@ https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=2048&s
 ```
 Replace `YOUR_CLIENT_ID` with the Application ID from the Discord Developer Portal.
 The `applications.commands` scope is required for slash commands.
+The bot also needs View Channel, Send Messages, Embed Links, and Read Message History
+in each channel where games run. If reinstalling with an invite URL, use a permissions
+value that includes those permissions, or grant them manually in the server/channel
+settings.
 
 ## Slash commands
 

@@ -142,6 +142,24 @@ def get_words(guild_id: str) -> list:
     return list(DEFAULT_WORDS)
 
 
+def missing_bot_permissions(interaction: discord.Interaction) -> list[str]:
+    """Return channel permissions the bot needs to run a game."""
+    if not interaction.guild or not interaction.channel:
+        return []
+    bot_member = interaction.guild.me
+    if bot_member is None:
+        return ["View Channel"]
+
+    permissions = interaction.channel.permissions_for(bot_member)
+    required = {
+        "view_channel": "View Channel",
+        "send_messages": "Send Messages",
+        "embed_links": "Embed Links",
+        "read_message_history": "Read Message History",
+    }
+    return [label for attribute, label in required.items() if not getattr(permissions, attribute)]
+
+
 def scramble_word(word: str) -> str:
     letters = list(word)
     while True:
@@ -343,8 +361,20 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
 @client.event
 async def on_ready():
     synced = await tree.sync()
+    guild_sync_counts = []
+    for guild in client.guilds:
+        # Copy the global command definitions into each joined guild so
+        # commands are available immediately instead of waiting for global
+        # Discord command propagation.
+        try:
+            tree.copy_global_to(guild=guild)
+            guild_synced = await asyncio.wait_for(tree.sync(guild=guild), timeout=15)
+            guild_sync_counts.append(f"{guild.name} ({len(guild_synced)})")
+        except Exception as e:
+            print(f"[WARN] Could not sync commands to {guild.name} ({guild.id}): {e}")
     print(f"Logged in as {client.user} (ID: {client.user.id})")
     print(f"Synced {len(synced)} slash command(s) globally.")
+    print(f"Synced commands to {len(guild_sync_counts)} server(s): {', '.join(guild_sync_counts)}")
 
 
 # ── on_message — handle replies and @mentions as guesses ──────────────────────
@@ -458,6 +488,16 @@ async def cmd_scramble(interaction: discord.Interaction):
         )
         return
 
+    missing = missing_bot_permissions(interaction)
+    if missing:
+        await interaction.response.send_message(
+            "I can't start a game in this channel because I need: "
+            + ", ".join(f"**{permission}**" for permission in missing)
+            + ". Ask a server administrator to grant these permissions.",
+            ephemeral=True,
+        )
+        return
+
     guild_id = str(interaction.guild_id)
     word = random.choice(get_words(guild_id))
     scrambled = scramble_word(word)
@@ -523,6 +563,16 @@ async def cmd_challenge(interaction: discord.Interaction):
     if channel_id in active_games:
         await interaction.response.send_message(
             "Finish the current `/scramble` game first before starting a challenge.",
+            ephemeral=True,
+        )
+        return
+
+    missing = missing_bot_permissions(interaction)
+    if missing:
+        await interaction.response.send_message(
+            "I can't start a challenge in this channel because I need: "
+            + ", ".join(f"**{permission}**" for permission in missing)
+            + ". Ask a server administrator to grant these permissions.",
             ephemeral=True,
         )
         return
