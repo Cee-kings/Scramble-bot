@@ -4,3 +4,6 @@ psycopg2-binary
 discord.py
 flask
 psycopg2-binary
+discord.py
+flask
+psycopg2-binary
