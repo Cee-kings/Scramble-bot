@@ -146,11 +146,16 @@ def missing_bot_permissions(interaction: discord.Interaction) -> list[str]:
     """Return channel permissions the bot needs to run a game."""
     if not interaction.guild or not interaction.channel:
         return []
-    bot_member = interaction.guild.me
-    if bot_member is None:
-        return ["View Channel"]
+    # Discord includes the app's effective channel permissions on every
+    # interaction. Prefer that over the cached guild member, which may be
+    # unavailable or stale in larger/older servers.
+    permissions = interaction.app_permissions
+    if permissions is None:
+        bot_member = interaction.guild.me
+        if bot_member is None:
+            return []
+        permissions = interaction.channel.permissions_for(bot_member)
 
-    permissions = interaction.channel.permissions_for(bot_member)
     required = {
         "view_channel": "View Channel",
         "send_messages": "Send Messages",
