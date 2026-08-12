@@ -495,6 +495,10 @@ async def cmd_scramble(interaction: discord.Interaction):
 
     missing = missing_bot_permissions(interaction)
     if missing:
+        print(
+            f"[WARN] /scramble blocked in {interaction.guild.name} "
+            f"#{interaction.channel.name}: missing {', '.join(missing)}"
+        )
         await interaction.response.send_message(
             "I can't start a game in this channel because I need: "
             + ", ".join(f"**{permission}**" for permission in missing)
@@ -574,6 +578,10 @@ async def cmd_challenge(interaction: discord.Interaction):
 
     missing = missing_bot_permissions(interaction)
     if missing:
+        print(
+            f"[WARN] /challenge blocked in {interaction.guild.name} "
+            f"#{interaction.channel.name}: missing {', '.join(missing)}"
+        )
         await interaction.response.send_message(
             "I can't start a challenge in this channel because I need: "
             + ", ".join(f"**{permission}**" for permission in missing)
