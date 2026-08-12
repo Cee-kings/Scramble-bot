@@ -192,8 +192,33 @@ active_games: dict[int, dict] = {}         # channel_id -> game dict
 active_challenges: dict[int, dict] = {}   # channel_id -> challenge dict
 skip_cooldowns: dict[int, float] = {}     # channel_id -> last-skip monotonic time
 challenge_just_ended: dict[int, float] = {}  # channel_id -> monotonic time challenge ended
+resolved_prompt_ids: dict[int, dict[int, float]] = {}  # channel_id -> prompt ID -> expiry
 
 CHALLENGE_END_GRACE = 30  # seconds to suppress "no active game" after a challenge finishes
+RESOLVED_PROMPT_TTL = 120  # ignore late replies to a recently completed prompt
+
+
+def remember_resolved_prompt(channel_id: int, prompt_msg_id: int | None):
+    """Remember a prompt so late replies do not look like new game attempts."""
+    if prompt_msg_id is None:
+        return
+    now = time.monotonic()
+    prompts = resolved_prompt_ids.setdefault(channel_id, {})
+    prompts[prompt_msg_id] = now + RESOLVED_PROMPT_TTL
+    for message_id, expires_at in list(prompts.items()):
+        if expires_at <= now:
+            prompts.pop(message_id, None)
+
+
+def is_resolved_prompt_reply(channel_id: int, prompt_msg_id: int | None) -> bool:
+    if prompt_msg_id is None:
+        return False
+    now = time.monotonic()
+    prompts = resolved_prompt_ids.get(channel_id, {})
+    for message_id, expires_at in list(prompts.items()):
+        if expires_at <= now:
+            prompts.pop(message_id, None)
+    return prompt_msg_id in prompts
 
 
 # ── Shared game logic ──────────────────────────────────────────────────────────
@@ -234,6 +259,7 @@ async def _apply_correct_guess(channel_id: int, user: discord.User | discord.Mem
         session = active_challenges.get(channel_id)
         if not session:
             return ""
+        remember_resolved_prompt(channel_id, game.get("prompt_msg_id"))
         active_games.pop(channel_id, None)
         if user_id not in session["session_scores"]:
             session["session_scores"][user_id] = {"name": user_name, "pts": 0}
@@ -319,6 +345,7 @@ async def run_challenge(channel: discord.TextChannel, guild_id: str):
                 on_hint=auto_hint, hint_at=HINT_UNLOCK_SECONDS,
             )
             if not guessed:
+                remember_resolved_prompt(channel_id, game_dict.get("prompt_msg_id"))
                 active_games.pop(channel_id, None)
                 await channel.send(f"⏰ Nobody got it! The word was **{word}**.")
 
@@ -394,6 +421,12 @@ async def on_message(message: discord.Message):
     # Determine trigger method ---------------------------------------------------
     # Replies to the bot's word prompt and @mentions always carry content,
     # even without the Message Content intent.
+    reply_message_id = message.reference.message_id if message.reference else None
+    if is_resolved_prompt_reply(channel_id, reply_message_id):
+        # Someone already solved or timed out this prompt. Ignore late replies
+        # instead of responding as if there were a new game.
+        return
+
     is_reply_to_prompt = (
         message.reference is not None
         and channel_id in active_games
@@ -668,7 +701,9 @@ async def cmd_skip(interaction: discord.Interaction):
         )
         return
 
-    word = active_games.pop(channel_id)["word"]
+    game = active_games.pop(channel_id)
+    remember_resolved_prompt(channel_id, game.get("prompt_msg_id"))
+    word = game["word"]
     skip_cooldowns[channel_id] = time.monotonic()
     await interaction.response.send_message(
         f"⏭️ Skipped! The word was **{word}**. Start a new round with `/scramble`."
@@ -687,6 +722,8 @@ async def cmd_end(interaction: discord.Interaction):
     if channel_id in active_challenges:
         session = active_challenges.pop(channel_id, None)
         game = active_games.pop(channel_id, None)
+        if game:
+            remember_resolved_prompt(channel_id, game.get("prompt_msg_id"))
         challenge_just_ended[channel_id] = time.monotonic()
         if session and session.get("task"):
             session["task"].cancel()
@@ -698,7 +735,9 @@ async def cmd_end(interaction: discord.Interaction):
         return
 
     if channel_id in active_games:
-        word = active_games.pop(channel_id)["word"]
+        game = active_games.pop(channel_id)
+        remember_resolved_prompt(channel_id, game.get("prompt_msg_id"))
+        word = game["word"]
         await interaction.response.send_message(f"🛑 Game ended. The word was **{word}**.")
         return
 
