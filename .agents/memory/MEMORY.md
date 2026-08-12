@@ -1,1 +1,2 @@
 - [Discord channel access](discord-channel-access.md) — A connected bot can still fail in individual servers or channels when Discord permissions are missing.
+- [Discord answer races](discord-answer-races.md) — Concurrent replies can arrive after state is cleared but before the winner announcement is sent.
