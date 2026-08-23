@@ -37,6 +37,39 @@ sybil sandwich front running frontrunning mev censorship permissionless
 decentralized centralized transparent immutable trustless pseudonymous
 """.split()
 
+EVERYDAY_WORDS = """
+always anyone anything apartment around arrive asleep bakery bedroom before
+behind better blanket bottle breakfast brother budget button cabinet camera
+cancel candle carpet carry ceiling cereal chance change cheese chicken child
+choose clothes coffee college dinner doctor dollar drawer dream dress drink
+early email enough enjoy family father feeling finish floor flower follow food
+friend fridge future garage garden garlic gentle glass grocery happy health
+hello helpful home honest hungry inside jacket kitchen laugh laundry lawyer
+learn leave living lunch market matter maybe middle minute mirror mother movie
+music nearly never night office often orange outside parent party people phone
+picture pillow pizza place please pocket police potato pretty problem promise
+quick quiet ready reason recipe relax remote repeat reply restaurant return
+school screen search season shirt simple sister sleep smile soccer someone
+sorry speak spoon sports spring stairs store street sugar summer sunny supper
+table teacher thanks theater thing ticket today toilet tomato travel treats
+understand useful voice wallet water week welcome window winter woman wonder
+worker write wrong yellow young yourself bedroom bicycle birthday airport
+animal basket beach beauty bicycle blanket bottle bridge brother butter
+carpet castle chair cheese cherry circle closet cookie corner couch country
+course cousin credit crowd culture customer daily danger daughter daylight
+dentist desert design dinner driving engine evening exercise farmer favorite
+feeling female finger fishing flower forest garden grocery haircut hallway
+healthy highway holiday hospital hotel hundred hungry journal kitchen laptop
+letter market meeting member message morning mother neighbor nephew notebook
+number ocean online opinion outside painter parents partner payment peanut
+people pepper person picnic planet player pocket popcorn popular present primary
+printer project quarter rabbit radio reader reason recycle regular remember
+report request season second service shower signal sister soccer solution
+spoon station stomach summer sweater teacher teenage telephone ticket toddler
+tomorrow tongue traffic train uncle useful vacation vegetable village visitor
+weather weekend welcome western window without workout writer yogurt
+""".split()
+
 # Common roots make useful word variants without requiring a large dependency
 # or an external dictionary at runtime.
 WORD_ROOTS = """
@@ -127,6 +160,7 @@ GENERATED_WORDS = [
 # such as "blockchain", "cryptography", and "fractionalization".
 DEFAULT_WORDS = sorted(set(
     CRYPTO_WORDS
+    + [word for word in EVERYDAY_WORDS if len(word) <= 7]
     + [word for word in GENERATED_WORDS if len(word) <= 7]
 ))
 
