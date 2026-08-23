@@ -8,6 +8,7 @@ import psycopg2
 import discord
 from discord import app_commands
 from flask import Flask
+from word_pool import DEFAULT_WORDS
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SCORES_FILE = "scores.json"
@@ -15,17 +16,6 @@ SKIP_COOLDOWN_SECONDS = 60
 CHALLENGE_WORDS = 20
 CHALLENGE_WORD_TIMEOUT = 60
 HINT_UNLOCK_SECONDS = 40
-
-DEFAULT_WORDS = [
-    "python", "discord", "scramble", "keyboard", "monitor", "network",
-    "server", "client", "database", "function", "variable", "integer",
-    "boolean", "library", "package", "module", "class", "object",
-    "method", "string", "turtle", "dolphin", "penguin", "elephant",
-    "giraffe", "kangaroo", "platypus", "volcano", "glacier", "thunder",
-    "lightning", "rainbow", "crystal", "diamond", "emerald", "sapphire",
-    "adventure", "mystery", "journey", "treasure", "fortress", "dungeon",
-    "champion", "triumph", "victory", "courage", "wisdom", "justice",
-]
 
 # ── JSON helpers ───────────────────────────────────────────────────────────────
 def load_json(path, default):
