@@ -70,6 +70,25 @@ tomorrow tongue traffic train uncle useful vacation vegetable village visitor
 weather weekend welcome western window without workout writer yogurt
 """.split()
 
+# Short, familiar game words: animals, insects, weather, food, colors, and
+# nature terms that are easy to recognize and unscramble.
+SHORT_FAMILIAR_WORDS = """
+pig dog cat horse sheep goat cow duck goose hen chick mouse rabbit tiger lion
+bear panda koala zebra camel monkey donkey gorilla otter shark whale dolphin
+seal squid crab shrimp trout salmon eagle hawk robin raven owl swan parrot
+finch crow sparrow pigeon pigeon bee ant bug fly moth beetle mantis worm snail
+spider lizard turtle frog snake toad dragonfly ladybug
+rain snow hail storm cloud windy sunny frost mist fog breeze thunder lightning
+rainbow season summer winter spring autumn
+orange apple pear peach grape lemon melon banana cherry berry carrot tomato
+potato onion garlic pepper butter bread toast rice pasta pizza burger sandwich
+salad cookie candy sugar honey cereal coffee water juice milk
+red blue green black white brown pink purple silver gold gray yellow
+sun moon star sky earth river lake ocean beach island hill mountain valley
+tree grass plant flower rose lily seed leaf root branch forest garden stone
+rock sand shell dirt fire smoke light shadow night morning evening
+""".split()
+
 # Common roots make useful word variants without requiring a large dependency
 # or an external dictionary at runtime.
 WORD_ROOTS = """
@@ -161,6 +180,7 @@ GENERATED_WORDS = [
 DEFAULT_WORDS = sorted(set(
     CRYPTO_WORDS
     + [word for word in EVERYDAY_WORDS if len(word) <= 7]
+    + [word for word in SHORT_FAMILIAR_WORDS if len(word) <= 7]
     + [word for word in GENERATED_WORDS if len(word) <= 7]
 ))
 
