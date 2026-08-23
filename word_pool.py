@@ -123,7 +123,12 @@ GENERATED_WORDS = [
     if len(root) >= 3 and len(root + ending) <= 18
 ]
 
-DEFAULT_WORDS = sorted(set(CRYPTO_WORDS + GENERATED_WORDS))
+# Keep general-game words short, while preserving longer crypto vocabulary
+# such as "blockchain", "cryptography", and "fractionalization".
+DEFAULT_WORDS = sorted(set(
+    CRYPTO_WORDS
+    + [word for word in GENERATED_WORDS if len(word) <= 7]
+))
 
 if len(DEFAULT_WORDS) <= 2000:
     raise RuntimeError(f"Built-in word pool must contain over 2,000 words, got {len(DEFAULT_WORDS)}")
